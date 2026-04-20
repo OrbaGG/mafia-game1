@@ -12,20 +12,29 @@ dp = Dispatcher(bot)
 
 # --- ИГРА ---
 game = {
-    "players": {},   # user_id: name
+    "players": {},
     "roles": {},
     "alive": set(),
     "phase": "waiting",
     "actions": {},
+    "max_players": 0,
 }
 
-ROLES = ["мафия", "дон", "шериф", "доктор", "проститутка"]
-
-# --- КЛАВИАТУРА ---
+# --- КНОПКИ ---
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("👥 Выбрать режим")
+    return kb
+
+def mode_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("4", "5", "6")
+    kb.add("7", "8", "9", "10")
+    return kb
+
+def join_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🎮 Join")
-    kb.add("🚀 Start Game")
     return kb
 
 def players_keyboard(exclude=None):
@@ -38,37 +47,76 @@ def players_keyboard(exclude=None):
 # --- START ---
 @dp.message_handler(commands=['start'])
 async def start_cmd(message: types.Message):
-    await message.answer(
-        "Добро пожаловать в Мафию 👁\nВыбери действие:",
-        reply_markup=main_menu()
-    )
+    await message.answer("Мафия 👁", reply_markup=main_menu())
+
+# --- ВЫБОР РЕЖИМА ---
+@dp.message_handler(lambda m: m.text == "👥 Выбрать режим")
+async def choose_mode(message: types.Message):
+    await message.answer("Выбери количество игроков:", reply_markup=mode_menu())
+
+@dp.message_handler(lambda m: m.text.isdigit())
+async def set_mode(message: types.Message):
+    n = int(message.text)
+
+    if n < 4:
+        await message.answer("Минимум 4 игрока")
+        return
+
+    game["players"].clear()
+    game["roles"].clear()
+    game["alive"].clear()
+
+    game["max_players"] = n
+
+    await message.answer(f"Режим: {n} игроков\nЖми Join", reply_markup=join_menu())
 
 # --- JOIN ---
-@dp.message_handler(lambda message: message.text == "🎮 Join")
+@dp.message_handler(lambda m: m.text == "🎮 Join")
 async def join_game(message: types.Message):
+    if game["max_players"] == 0:
+        await message.answer("Сначала выбери режим")
+        return
+
     user = message.from_user
 
     if user.id not in game["players"]:
         game["players"][user.id] = user.first_name
-        count = len(game["players"])
 
-        await message.answer(
-            f"👤 {user.first_name} присоединился!\n👥 Игроков: {count}"
-        )
-    else:
-        await message.answer("Ты уже в игре")
+    count = len(game["players"])
+    left = game["max_players"] - count
 
-# --- START GAME ---
-@dp.message_handler(lambda message: message.text == "🚀 Start Game")
-async def start_game(message: types.Message):
-    if len(game["players"]) < 2:
-        await message.answer("Нужно минимум 2 игрока!")
-        return
+    names = "\n".join(game["players"].values())
 
+    await message.answer(
+        f"👥 Игроки ({count}/{game['max_players']}):\n{names}\n\n"
+        f"Осталось: {left}"
+    )
+
+    if count == game["max_players"]:
+        await start_game_auto(message)
+
+# --- МАФИЯ КОЛ-ВО ---
+def get_mafia_count(n):
+    if n in [4, 5, 6]:
+        return 1
+    if n == 7:
+        return 2
+    if n == 8:
+        return random.choice([2, 3])
+    if n in [9, 10]:
+        return 3
+    return 1
+
+# --- СТАРТ ИГРЫ ---
+async def start_game_auto(message):
     players = list(game["players"].keys())
     game["alive"] = set(players)
 
-    roles = ROLES.copy()
+    mafia_count = get_mafia_count(len(players))
+
+    roles = ["мафия"] * mafia_count
+    roles += ["шериф", "доктор"]
+
     while len(roles) < len(players):
         roles.append("мирный")
 
@@ -77,11 +125,11 @@ async def start_game(message: types.Message):
     for p, r in zip(players, roles):
         game["roles"][p] = r
         try:
-            await bot.send_message(p, f"🎭 Твоя роль: *{r}*", parse_mode="Markdown")
+            await bot.send_message(p, f"🎭 Твоя роль: {r}")
         except:
             pass
 
-    await message.answer("🎬 Игра начинается!\n🌙 Ночь...")
+    await message.answer("🎬 Игра началась!\n🌙 Ночь...")
     await night_phase(message.chat.id)
 
 # --- НОЧЬ ---
@@ -92,7 +140,7 @@ async def night_phase(chat_id):
     await bot.send_message(chat_id, "🌙 НОЧЬ")
 
     for uid, role in game["roles"].items():
-        if uid in game["alive"] and role in ["мафия", "дон"]:
+        if uid in game["alive"] and role == "мафия":
             await bot.send_message(uid, "🔪 Выбери жертву", reply_markup=players_keyboard(uid))
 
     await asyncio.sleep(20)
@@ -109,12 +157,6 @@ async def night_phase(chat_id):
 
     await asyncio.sleep(15)
 
-    for uid, role in game["roles"].items():
-        if role == "проститутка" and uid in game["alive"]:
-            await bot.send_message(uid, "💋 Кого блокировать?", reply_markup=players_keyboard(uid))
-
-    await asyncio.sleep(15)
-
     await resolve_night(chat_id)
 
 # --- ДЕЙСТВИЯ ---
@@ -127,17 +169,13 @@ async def actions(call: types.CallbackQuery):
     if game["phase"] != "night":
         return
 
-    if role in ["мафия", "дон"]:
+    if role == "мафия":
         game["actions"]["kill"] = target
         await call.answer("Жертва выбрана")
 
     elif role == "доктор":
         game["actions"]["heal"] = target
         await call.answer("Лечишь")
-
-    elif role == "проститутка":
-        game["actions"]["block"] = target
-        await call.answer("Заблокировал")
 
     elif role == "шериф":
         r = game["roles"].get(target)
@@ -201,7 +239,7 @@ async def check_win(chat_id):
     civil = 0
 
     for p in game["alive"]:
-        if game["roles"][p] in ["мафия", "дон"]:
+        if game["roles"][p] == "мафия":
             mafia += 1
         else:
             civil += 1
