@@ -20,7 +20,7 @@ game = {
     "max_players": 0,
 }
 
-# --- КНОПКИ ---
+# --- UI ---
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👥 Выбрать режим")
@@ -88,8 +88,7 @@ async def join_game(message: types.Message):
     names = "\n".join(game["players"].values())
 
     await message.answer(
-        f"👥 Игроки ({count}/{game['max_players']}):\n{names}\n\n"
-        f"Осталось: {left}"
+        f"👥 Игроки ({count}/{game['max_players']}):\n{names}\n\nОсталось: {left}"
     )
 
     if count == game["max_players"]:
@@ -107,7 +106,7 @@ def get_mafia_count(n):
         return 3
     return 1
 
-# --- СТАРТ ИГРЫ ---
+# --- СТАРТ ---
 async def start_game_auto(message):
     players = list(game["players"].keys())
     game["alive"] = set(players)
@@ -135,25 +134,32 @@ async def start_game_auto(message):
 # --- НОЧЬ ---
 async def night_phase(chat_id):
     game["phase"] = "night"
-    game["actions"] = {}
+    game["actions"] = {"mafia_votes": {}}
 
-    await bot.send_message(chat_id, "🌙 НОЧЬ")
+    await bot.send_message(chat_id, "🌙 НОЧЬ (35 сек)\nМафия выбирает жертву")
 
+    # мафия
     for uid, role in game["roles"].items():
         if uid in game["alive"] and role == "мафия":
-            await bot.send_message(uid, "🔪 Выбери жертву", reply_markup=players_keyboard(uid))
+            await bot.send_message(
+                uid,
+                "🔪 Выбери жертву\n(убийство только если все мафии выберут одного)",
+                reply_markup=players_keyboard(uid)
+            )
 
-    await asyncio.sleep(20)
+    await asyncio.sleep(35)
 
+    # доктор
     for uid, role in game["roles"].items():
         if role == "доктор" and uid in game["alive"]:
             await bot.send_message(uid, "💉 Кого лечить?", reply_markup=players_keyboard())
 
     await asyncio.sleep(15)
 
+    # шериф
     for uid, role in game["roles"].items():
         if role == "шериф" and uid in game["alive"]:
-            await bot.send_message(uid, "🕵️ Проверить", reply_markup=players_keyboard(uid))
+            await bot.send_message(uid, "🕵️ Проверить игрока", reply_markup=players_keyboard(uid))
 
     await asyncio.sleep(15)
 
@@ -169,9 +175,10 @@ async def actions(call: types.CallbackQuery):
     if game["phase"] != "night":
         return
 
+    # мафия голосует
     if role == "мафия":
-        game["actions"]["kill"] = target
-        await call.answer("Жертва выбрана")
+        game["actions"]["mafia_votes"][user] = target
+        await call.answer("Голос принят")
 
     elif role == "доктор":
         game["actions"]["heal"] = target
@@ -179,13 +186,26 @@ async def actions(call: types.CallbackQuery):
 
     elif role == "шериф":
         r = game["roles"].get(target)
-        await bot.send_message(user, f"🕵️ Роль: {r}")
+
+        if r == "мафия":
+            text = "🔴 Он ЧЁРНЫЙ"
+        else:
+            text = "🟢 Он КРАСНЫЙ"
+
+        await bot.send_message(user, text)
         await call.answer("Проверено")
 
 # --- РЕЗУЛЬТАТ НОЧИ ---
 async def resolve_night(chat_id):
-    kill = game["actions"].get("kill")
+    votes = game["actions"].get("mafia_votes", {})
     heal = game["actions"].get("heal")
+
+    kill = None
+
+    if votes:
+        targets = list(votes.values())
+        if len(set(targets)) == 1:
+            kill = targets[0]
 
     if kill and kill != heal:
         game["alive"].discard(kill)
@@ -200,8 +220,8 @@ async def resolve_night(chat_id):
 async def day_phase(chat_id):
     game["phase"] = "day"
 
-    await bot.send_message(chat_id, "☀️ День (30 сек)")
-    await asyncio.sleep(30)
+    await bot.send_message(chat_id, "☀️ День (60 сек) — обсуждение")
+    await asyncio.sleep(60)
 
     kb = players_keyboard()
     await bot.send_message(chat_id, "🗳 Голосование", reply_markup=kb)
@@ -211,12 +231,22 @@ async def day_phase(chat_id):
 
     await resolve_votes(chat_id)
 
+# --- МЁРТВЫЕ НЕ ПИШУТ ---
+@dp.message_handler()
+async def chat_control(message: types.Message):
+    if game["phase"] == "day":
+        if message.from_user.id not in game["alive"]:
+            try:
+                await message.delete()
+            except:
+                pass
+
+# --- ГОЛОСА ---
 @dp.callback_query_handler(lambda c: game["phase"] == "day")
 async def vote(call: types.CallbackQuery):
     game["votes"][call.from_user.id] = int(call.data)
     await call.answer("Голос принят")
 
-# --- ГОЛОСА ---
 async def resolve_votes(chat_id):
     votes = {}
 
@@ -247,6 +277,7 @@ async def check_win(chat_id):
     if mafia == 0:
         await bot.send_message(chat_id, "🏆 Мирные победили!")
         return
+
     if mafia >= civil:
         await bot.send_message(chat_id, "💀 Мафия победила!")
         return
