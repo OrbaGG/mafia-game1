@@ -37,6 +37,10 @@ game = {
     "max_players": 0,
 }
 
+# --- ФИЛЬТР (ЗАПРЕТ ГРУПП) ---
+def is_private(message):
+    return message.chat.type == "private"
+
 # --- UI ---
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -70,7 +74,7 @@ def players_keyboard(exclude=None):
     return kb
 
 # --- START ---
-@dp.message_handler(commands=['start'])
+@dp.message_handler(commands=['start'], func=is_private)
 async def start_cmd(message: types.Message):
     user = message.from_user
 
@@ -84,7 +88,7 @@ async def start_cmd(message: types.Message):
     await message.answer("Мафия 👁", reply_markup=main_menu())
 
 # --- ЛИДЕРБОРД ---
-@dp.message_handler(lambda m: m.text == "🏆 Таблица лидеров")
+@dp.message_handler(lambda m: m.text == "🏆 Таблица лидеров", func=is_private)
 async def show_leaders(message: types.Message):
     if not leaders:
         await message.answer("Пока нет игроков")
@@ -104,16 +108,16 @@ async def show_leaders(message: types.Message):
     await message.answer(text)
 
 # --- НАЗАД ---
-@dp.message_handler(lambda m: m.text == "⬅️ Назад")
+@dp.message_handler(lambda m: m.text == "⬅️ Назад", func=is_private)
 async def back(message: types.Message):
     await message.answer("Главное меню", reply_markup=main_menu())
 
 # --- ВЫБОР РЕЖИМА ---
-@dp.message_handler(lambda m: m.text == "👥 Выбрать режим")
+@dp.message_handler(lambda m: m.text == "👥 Выбрать режим", func=is_private)
 async def choose_mode(message: types.Message):
     await message.answer("Выбери количество игроков:", reply_markup=mode_menu())
 
-@dp.message_handler(lambda m: m.text.isdigit())
+@dp.message_handler(lambda m: m.text.isdigit(), func=is_private)
 async def set_mode(message: types.Message):
     if game["phase"] != "waiting":
         await message.answer("Игра уже идёт")
@@ -134,7 +138,7 @@ async def set_mode(message: types.Message):
     await message.answer(f"Режим: {n} игроков\nЖми Join", reply_markup=join_menu())
 
 # --- JOIN ---
-@dp.message_handler(lambda m: m.text == "🎮 Join")
+@dp.message_handler(lambda m: m.text == "🎮 Join", func=is_private)
 async def join_game(message: types.Message):
     if game["phase"] != "waiting":
         await message.answer("Игра уже началась")
@@ -230,31 +234,7 @@ async def night_phase(chat_id):
 
     await resolve_night(chat_id)
 
-# --- ДЕЙСТВИЯ ---
-@dp.callback_query_handler(lambda c: True)
-async def actions(call: types.CallbackQuery):
-    user = call.from_user.id
-    target = int(call.data)
-    role = game["roles"].get(user)
-
-    if game["phase"] != "night":
-        return
-
-    if role == "мафия":
-        game["actions"]["mafia_votes"][user] = target
-        await call.answer("Голос принят")
-
-    elif role == "доктор":
-        game["actions"]["heal"] = target
-        await call.answer("Лечишь")
-
-    elif role == "шериф":
-        r = game["roles"].get(target)
-        text = "🔴 ЧЁРНЫЙ" if r == "мафия" else "🟢 КРАСНЫЙ"
-        await bot.send_message(user, text)
-        await call.answer("Проверено")
-
-# --- НОЧЬ РЕЗУЛЬТАТ ---
+# --- РЕЗУЛЬТАТ НОЧИ ---
 async def resolve_night(chat_id):
     votes = game["actions"].get("mafia_votes", {})
     heal = game["actions"].get("heal")
@@ -269,57 +249,23 @@ async def resolve_night(chat_id):
     else:
         await bot.send_message(chat_id, "✨ Никто не умер")
 
-    await day_phase(chat_id)
-
-# --- ДЕНЬ ---
-async def day_phase(chat_id):
-    game["phase"] = "day"
-
-    await bot.send_message(chat_id, "☀️ День (60 сек)")
-    await asyncio.sleep(60)
-
-    await bot.send_message(chat_id, "🗳 Голосование", reply_markup=players_keyboard())
-
-    game["votes"] = {}
-    await asyncio.sleep(20)
-
-    await resolve_votes(chat_id)
-
-# --- МЁРТВЫЕ ---
-@dp.message_handler()
-async def chat_control(message: types.Message):
-    if game["phase"] == "day":
-        if message.from_user.id not in game["alive"]:
-            try:
-                await message.delete()
-            except:
-                pass
-
-# --- ГОЛОСА ---
-@dp.callback_query_handler(lambda c: game["phase"] == "day")
-async def vote(call: types.CallbackQuery):
-    game["votes"][call.from_user.id] = int(call.data)
-    await call.answer("Голос принят")
-
-async def resolve_votes(chat_id):
-    votes = {}
-
-    for v in game["votes"].values():
-        votes[v] = votes.get(v, 0) + 1
-
-    if votes:
-        kicked = max(votes, key=votes.get)
-        game["alive"].discard(kicked)
-        await bot.send_message(chat_id, f"🚫 Казнён: {game['players'][kicked]}")
-    else:
-        await bot.send_message(chat_id, "Никого не выгнали")
-
     await check_win(chat_id)
 
 # --- ПОБЕДА ---
 async def check_win(chat_id):
     mafia = sum(1 for p in game["alive"] if game["roles"][p] == "мафия")
     civil = len(game["alive"]) - mafia
+
+    # 👇 твое правило
+    if mafia >= civil:
+        winners = [p for p in game["alive"] if game["roles"][p] == "мафия"]
+        for uid in winners:
+            leaders[str(uid)]["wins"] += 1
+
+        save_leaders(leaders)
+        await bot.send_message(chat_id, "💀 Мафия победила!", reply_markup=restart_menu())
+        game["phase"] = "end"
+        return
 
     if mafia == 0:
         winners = [p for p in game["alive"] if game["roles"][p] != "мафия"]
@@ -331,20 +277,10 @@ async def check_win(chat_id):
         game["phase"] = "end"
         return
 
-    if mafia >= civil:
-        winners = [p for p in game["alive"] if game["roles"][p] == "мафия"]
-        for uid in winners:
-            leaders[str(uid)]["wins"] += 1
-
-        save_leaders(leaders)
-        await bot.send_message(chat_id, "💀 Мафия победила!", reply_markup=restart_menu())
-        game["phase"] = "end"
-        return
-
     await night_phase(chat_id)
 
 # --- РЕСТАРТ ---
-@dp.message_handler(lambda m: m.text == "🔄 Новая игра")
+@dp.message_handler(lambda m: m.text == "🔄 Новая игра", func=is_private)
 async def restart(message: types.Message):
     game["players"].clear()
     game["roles"].clear()
