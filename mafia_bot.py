@@ -28,7 +28,8 @@ def save(data):
 leaders = load()
 
 # --- ЛОББИ ---
-lobbies = {}  # size: lobby
+lobbies = {}
+user_mode = {}
 
 def create_lobby(size):
     return {
@@ -114,18 +115,36 @@ async def play(message: types.Message):
 
     await message.answer("Выбери режим:", reply_markup=modes_menu())
 
-# --- ВЫБОР ---
+# --- ВЫБОР РЕЖИМА ---
 @dp.message_handler(lambda m: "игроков" in m.text)
 async def choose(message: types.Message):
     if message.chat.type != "private":
         return
 
     size = int(message.text.split()[0])
+    user_mode[message.from_user.id] = size
 
     if size not in lobbies:
         lobbies[size] = create_lobby(size)
 
     await message.answer(f"Лобби {size} игроков", reply_markup=join_menu())
+
+# --- НАЗАД (ВЫХОД ИЗ ЛОББИ) ---
+@dp.message_handler(lambda m: m.text == "⬅️ Назад")
+async def back(message: types.Message):
+    if message.chat.type != "private":
+        return
+
+    user = message.from_user
+    lobby = get_user_lobby(user.id)
+
+    if lobby and lobby["phase"] == "waiting":
+        lobby["players"].pop(user.id, None)
+        await message.answer("Ты вышел из лобби")
+
+    user_mode.pop(user.id, None)
+
+    await message.answer("Главное меню", reply_markup=main_menu())
 
 # --- JOIN ---
 @dp.message_handler(lambda m: m.text == "🎮 Join")
@@ -135,29 +154,41 @@ async def join(message: types.Message):
 
     user = message.from_user
 
-    if get_user_lobby(user.id):
-        await message.answer("Ты уже в игре")
+    if user.id not in user_mode:
+        await message.answer("Сначала выбери режим")
         return
 
-    # найти активное лобби
-    for size, lobby in lobbies.items():
-        if lobby["phase"] == "waiting" and len(lobby["players"]) < size:
-            lobby["players"][user.id] = user.first_name
+    size = user_mode[user.id]
 
-            count = len(lobby["players"])
-            names = "\n".join(lobby["players"].values())
+    if size not in lobbies:
+        lobbies[size] = create_lobby(size)
 
-            await message.answer(f"{names}\n({count}/{size})")
+    lobby = lobbies[size]
 
-            if count == size:
-                await start_game(lobby, message.chat.id)
+    if lobby["phase"] != "waiting":
+        await message.answer("Игра уже началась")
+        return
 
-            return
+    if len(lobby["players"]) >= size:
+        await message.answer("Лобби заполнено")
+        return
 
-    await message.answer("Нет доступных лобби")
+    if user.id in lobby["players"]:
+        await message.answer("Ты уже в лобби")
+        return
+
+    lobby["players"][user.id] = user.first_name
+
+    count = len(lobby["players"])
+    names = "\n".join(lobby["players"].values())
+
+    await message.answer(f"{names}\n({count}/{size})")
+
+    if count == size:
+        await start_game(lobby)
 
 # --- СТАРТ ---
-async def start_game(lobby, chat_id):
+async def start_game(lobby):
     lobby["phase"] = "night"
     players = list(lobby["players"].keys())
     lobby["alive"] = set(players)
@@ -172,15 +203,16 @@ async def start_game(lobby, chat_id):
         lobby["roles"][p] = r
         await bot.send_message(p, f"🎭 {r}")
 
-    await bot.send_message(chat_id, "🌙 Ночь")
-    await night(lobby, chat_id)
+    for p in players:
+        await bot.send_message(p, "🌙 Игра началась! Ночь")
+
+    await night(lobby)
 
 # --- НОЧЬ ---
-async def night(lobby, chat_id):
+async def night(lobby):
     lobby["phase"] = "night"
     lobby["actions"] = {"votes": {}}
 
-    # мафия чат
     mafia = [p for p in lobby["alive"] if lobby["roles"][p] == "мафия"]
 
     for uid in mafia:
@@ -188,15 +220,14 @@ async def night(lobby, chat_id):
 
     await asyncio.sleep(35)
 
-    # убийство
     for uid in mafia:
         await bot.send_message(uid, "🔪 Выбери", reply_markup=players_kb(lobby, uid))
 
     await asyncio.sleep(15)
 
-    await resolve_night(lobby, chat_id)
+    await resolve_night(lobby)
 
-# --- СООБЩЕНИЯ МАФИИ ---
+# --- ЧАТ МАФИИ ---
 @dp.message_handler()
 async def mafia_chat(message: types.Message):
     if message.chat.type != "private":
@@ -225,7 +256,7 @@ async def actions(call: types.CallbackQuery):
     await call.answer("Принято")
 
 # --- РЕЗУЛЬТАТ ---
-async def resolve_night(lobby, chat_id):
+async def resolve_night(lobby):
     votes = lobby["actions"]["votes"]
 
     kill = None
@@ -234,14 +265,16 @@ async def resolve_night(lobby, chat_id):
 
     if kill:
         lobby["alive"].discard(kill)
-        await bot.send_message(chat_id, f"💀 {lobby['players'][kill]}")
+        for p in lobby["players"]:
+            await bot.send_message(p, f"💀 Убит: {lobby['players'][kill]}")
     else:
-        await bot.send_message(chat_id, "✨ Никто")
+        for p in lobby["players"]:
+            await bot.send_message(p, "✨ Никто не умер")
 
-    await check_win(lobby, chat_id)
+    await check_win(lobby)
 
 # --- ПОБЕДА ---
-async def check_win(lobby, chat_id):
+async def check_win(lobby):
     mafia = sum(1 for p in lobby["alive"] if lobby["roles"][p] == "мафия")
     civil = len(lobby["alive"]) - mafia
 
@@ -251,7 +284,10 @@ async def check_win(lobby, chat_id):
                 leaders[str(p)]["wins"] += 1
 
         save(leaders)
-        await bot.send_message(chat_id, "💀 Мафия победила")
+
+        for p in lobby["players"]:
+            await bot.send_message(p, "💀 Мафия победила")
+
         lobby["phase"] = "end"
         return
 
@@ -261,11 +297,14 @@ async def check_win(lobby, chat_id):
                 leaders[str(p)]["wins"] += 1
 
         save(leaders)
-        await bot.send_message(chat_id, "🏆 Мирные победили")
+
+        for p in lobby["players"]:
+            await bot.send_message(p, "🏆 Мирные победили")
+
         lobby["phase"] = "end"
         return
 
-    await night(lobby, chat_id)
+    await night(lobby)
 
 # --- RUN ---
 if __name__ == "__main__":
