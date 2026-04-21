@@ -6,6 +6,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 
+game_mode = {}
+
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
