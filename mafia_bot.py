@@ -6,8 +6,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 
-game_mode = {}
-
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
@@ -30,8 +28,10 @@ def save(data):
 leaders = load()
 
 # --- ЛОББИ ---
+game_mode = {}
 lobbies = {}
 user_mode = {}
+
 
 def create_lobby(size):
     return {
@@ -45,6 +45,17 @@ def create_lobby(size):
 
 # --- UI ---
 def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🎮 Старт")
+    return kb
+
+def game_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🕵️ Мафия")
+    kb.add("🚢 Морской бой")
+    return kb
+
+def mafia_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👥 Играть")
     kb.add("🏆 Лидеры")
